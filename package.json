@@ -1,0 +1,28 @@
+{
+  "name": "ciao",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 0.0.0.0",
+    "prebuild": "node scripts/prepare-ort-assets.mjs",
+    "build": "tsc --noEmit && vite build",
+    "moss:download": "node scripts/download-moss-nano-onnx.mjs",
+    "moss:optimize": "python3 scripts/optimize-moss-webgpu.py",
+    "moss:fp16": "python3 scripts/convert-moss-webgpu-fp16.py",
+    "moss:steps": "python3 scripts/specialize-moss-steps.py",
+    "preview": "vite preview --host 0.0.0.0",
+    "container:build": "podman build --format docker -t ciao:latest .",
+    "container:run": "podman run --rm -p 8080:8080 ciao:latest",
+    "compose:cloudflare": "podman compose -f compose.cloudflare.yml up --build"
+  },
+  "dependencies": {
+    "lucide": "^0.468.0",
+    "onnxruntime-web": "^1.26.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.3",
+    "vite": "^5.4.11",
+    "vite-plugin-pwa": "^0.20.5"
+  }
+}

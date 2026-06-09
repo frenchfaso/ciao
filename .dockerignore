@@ -1,0 +1,15 @@
+node_modules
+dist
+.git
+.devcontainer
+.agents
+.codex
+.venv
+.local
+.cache
+.env
+.env.*
+.DS_Store
+npm-debug.log*
+__pycache__
+*.pyc

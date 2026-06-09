@@ -1,0 +1,15 @@
+node_modules/
+dist/
+.vite/
+.venv/
+.local/
+.cache/
+.env
+.env.*
+!.env.example
+public/ort/*
+!public/ort/.gitkeep
+.DS_Store
+*.local
+__pycache__/
+*.pyc

@@ -1,0 +1,20 @@
+{
+  "name": "ciao",
+  "image": "mcr.microsoft.com/devcontainers/javascript-node:1-22-bookworm",
+  "workspaceFolder": "/workspaces/ciao",
+  "remoteUser": "node",
+  "mounts": [
+    "source=ciao-node-modules,target=${containerWorkspaceFolder}/node_modules,type=volume"
+  ],
+  "forwardPorts": [5173],
+  "portsAttributes": {
+    "5173": {
+      "label": "Vite",
+      "onAutoForward": "notify"
+    }
+  },
+  "postCreateCommand": "sudo chown -R node:node node_modules && npm install",
+  "customizations": {
+    "vscode": {}
+  }
+}
