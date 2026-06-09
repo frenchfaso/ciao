@@ -9,6 +9,8 @@ dist
 .cache
 .env
 .env.*
+public/ort/*
+!public/ort/.gitkeep
 .DS_Store
 npm-debug.log*
 __pycache__
