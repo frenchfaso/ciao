@@ -18,14 +18,14 @@ superframe. The static decoder graph declares `[1, 2, 26880]` raw audio output
 for seven token steps; the runtime trims that output to the original
 23040-sample frame before playout.
 
-The app expects these files:
+The app expects one encoder model, one decoder model, and the small MOSS
+metadata file. The ONNX external weight data is embedded into the two active
+model files:
 
 ```text
 public/models/moss/audio-tokenizer-nano-onnx/codec_browser_onnx_meta.json
 public/models/moss/audio-tokenizer-nano-onnx/moss_audio_tokenizer_encode.steps7.webgpu.onnx
-public/models/moss/audio-tokenizer-nano-onnx/moss_audio_tokenizer_encode.data
 public/models/moss/audio-tokenizer-nano-onnx/moss_audio_tokenizer_decode_step.fp16.steps7.webgpu.onnx
-public/models/moss/audio-tokenizer-nano-onnx/moss_audio_tokenizer_decode_shared.fp16.data
 ```
 
 Re-fetch or verify the pinned assets from the dev container:
@@ -38,10 +38,11 @@ npm run moss:steps
 npm run build
 ```
 
-The upstream `.onnx` source files and fp32 decoder files are transient
-regeneration inputs. They are downloaded by `moss:download`, converted by
-`moss:optimize` and `moss:fp16`, then removed by `moss:steps` after the active
-step-7 production files have been written.
+The upstream `.onnx` source files, fp32 decoder files, and external `.data`
+weight files are transient regeneration inputs. They are downloaded by
+`moss:download`, converted by `moss:optimize` and `moss:fp16`, then embedded and
+removed by `moss:steps` after the active step-7 production files have been
+written.
 The fp16 files are regenerated from the static fp32 `.webgpu.onnx` files and are
 not downloaded from upstream. The conversion validates exact encoder token
 match and decoder SNR against the fp32 baseline before replacing the vendored

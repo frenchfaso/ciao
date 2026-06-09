@@ -7,6 +7,10 @@ export type OrtOutputs = Ort.InferenceSession.ReturnType;
 export type OrtFeeds = Record<string, OrtTensor>;
 
 export type MossMeta = {
+  runtime_files?: {
+    encode: string;
+    decode_step: string;
+  };
   codec_config: {
     sample_rate: number;
     channels: number;
@@ -53,7 +57,7 @@ type RuntimeCacheAsset = {
   cacheName: string;
 };
 
-export type MossRuntimeAssets = Record<'meta' | 'encoderModel' | 'encoderData' | 'decoderStepModel' | 'decoderData', Uint8Array>;
+export type MossRuntimeAssets = Record<'meta' | 'encoderModel' | 'decoderStepModel', Uint8Array>;
 
 export type MossRuntime = {
   ort: OrtModule;
@@ -73,12 +77,8 @@ type MossModelProfile = {
   cacheName: string;
   encoderModelFile: string;
   encoderModelSize: number;
-  encoderDataFile: string;
-  encoderDataSize: number;
   decoderModelFile: string;
   decoderModelSize: number;
-  decoderDataFile: string;
-  decoderDataSize: number;
 };
 
 const MOSS_MODEL_BASE = '/models/moss/audio-tokenizer-nano-onnx';
@@ -86,22 +86,16 @@ const ORT_ASSET_BASE = '/ort/1.26.0';
 const ORT_CACHE_NAME = 'ciao-ort-runtime-v1';
 const ORT_ASSET_VERSION = 'ort-1.26.0';
 const MOSS_MODEL_PROFILE = {
-  assetVersion: 'moss-nano-webgpu-fp16-v7-steps7',
-  cacheName: 'ciao-moss-models-fp16-v7',
+  assetVersion: 'moss-nano-webgpu-fp16-v9-embedded-steps7',
+  cacheName: 'ciao-moss-models-fp16-v9',
   encoderModelFile: 'moss_audio_tokenizer_encode.steps7.webgpu.onnx',
-  encoderModelSize: 815_731,
-  encoderDataFile: 'moss_audio_tokenizer_encode.data',
-  encoderDataSize: 44_507_136,
+  encoderModelSize: 45_306_869,
   decoderModelFile: 'moss_audio_tokenizer_decode_step.fp16.steps7.webgpu.onnx',
-  decoderModelSize: 415_418,
-  decoderDataFile: 'moss_audio_tokenizer_decode_shared.fp16.data',
-  decoderDataSize: 23_491_584,
+  decoderModelSize: 23_897_423,
 } as const satisfies MossModelProfile;
 
 const MOSS_ASSET_VERSION = MOSS_MODEL_PROFILE.assetVersion;
 const MOSS_MODEL_CACHE_NAME = MOSS_MODEL_PROFILE.cacheName;
-const MOSS_ENCODER_EXTERNAL_DATA = MOSS_MODEL_PROFILE.encoderDataFile;
-const MOSS_DECODER_EXTERNAL_DATA = MOSS_MODEL_PROFILE.decoderDataFile;
 
 const MOSS_RUNTIME_ASSETS = [
   {
@@ -109,7 +103,7 @@ const MOSS_RUNTIME_ASSETS = [
     label: 'meta',
     path: `${MOSS_MODEL_BASE}/codec_browser_onnx_meta.json`,
     version: MOSS_ASSET_VERSION,
-    size: 17_036,
+    size: 16_118,
     cacheName: MOSS_MODEL_CACHE_NAME,
   },
   {
@@ -121,27 +115,11 @@ const MOSS_RUNTIME_ASSETS = [
     cacheName: MOSS_MODEL_CACHE_NAME,
   },
   {
-    key: 'encoderData',
-    label: 'encoder weights',
-    path: `${MOSS_MODEL_BASE}/${MOSS_MODEL_PROFILE.encoderDataFile}`,
-    version: MOSS_ASSET_VERSION,
-    size: MOSS_MODEL_PROFILE.encoderDataSize,
-    cacheName: MOSS_MODEL_CACHE_NAME,
-  },
-  {
     key: 'decoderStepModel',
     label: 'decoder ONNX',
     path: `${MOSS_MODEL_BASE}/${MOSS_MODEL_PROFILE.decoderModelFile}`,
     version: MOSS_ASSET_VERSION,
     size: MOSS_MODEL_PROFILE.decoderModelSize,
-    cacheName: MOSS_MODEL_CACHE_NAME,
-  },
-  {
-    key: 'decoderData',
-    label: 'decoder weights',
-    path: `${MOSS_MODEL_BASE}/${MOSS_MODEL_PROFILE.decoderDataFile}`,
-    version: MOSS_ASSET_VERSION,
-    size: MOSS_MODEL_PROFILE.decoderDataSize,
     cacheName: MOSS_MODEL_CACHE_NAME,
   },
 ] as const satisfies readonly RuntimeCacheAsset[];
@@ -265,13 +243,7 @@ async function loadOrt() {
   return ort;
 }
 
-async function createExternalDataSession(
-  ort: OrtModule,
-  model: Uint8Array,
-  externalPath: string,
-  externalData: Uint8Array,
-  tuning: MossSessionTuning = {},
-) {
+async function createModelSession(ort: OrtModule, model: Uint8Array, tuning: MossSessionTuning = {}) {
   const baseOptions = {
     executionProviders: ['webgpu'],
     graphOptimizationLevel: 'all',
@@ -286,15 +258,10 @@ async function createExternalDataSession(
   let firstError: unknown = null;
 
   for (const options of optionCandidates) {
-    for (const path of [externalPath, `./${externalPath}`]) {
-      try {
-        return await ort.InferenceSession.create(model, {
-          ...options,
-          externalData: [{ path, data: externalData }],
-        } as Ort.InferenceSession.SessionOptions);
-      } catch (error) {
-        firstError ??= error;
-      }
+    try {
+      return await ort.InferenceSession.create(model, options as Ort.InferenceSession.SessionOptions);
+    } catch (error) {
+      firstError ??= error;
     }
   }
 
@@ -439,21 +406,17 @@ async function createMossRuntime(): Promise<MossRuntime> {
   const ort = await loadOrt();
 
   let encoderModel = assets.encoderModel;
-  const encoder = await createExternalDataSession(
+  const encoder = await createModelSession(
     ort,
     encoderModel,
-    MOSS_ENCODER_EXTERNAL_DATA,
-    assets.encoderData,
     mossEncoderSessionTuning(),
   );
   encoderModel = new Uint8Array();
 
   let decoderModel = assets.decoderStepModel;
-  const decoder = await createExternalDataSession(
+  const decoder = await createModelSession(
     ort,
     decoderModel,
-    MOSS_DECODER_EXTERNAL_DATA,
-    assets.decoderData,
     mossDecoderSessionTuning(meta),
   );
   decoderModel = new Uint8Array();

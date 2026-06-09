@@ -46,7 +46,7 @@ decoder SNR against the fp32 baseline before writing vendored assets.
   available, the app reports MOSS unavailable and does not emit PCM fallback
   audio.
 - Model files are loaded as bytes from the app-managed Cache Storage cache,
-  then passed to ONNX Runtime with explicit external data buffers.
+  then passed to ONNX Runtime as embedded ONNX model buffers.
 - The app verifies exact byte sizes before accepting a cached model asset.
 - Service worker updates reload the page only when no call, echo test,
   signaling session, or audio engine is active.
@@ -63,9 +63,9 @@ npm run moss:steps
 npm run build
 ```
 
-`moss:steps` writes only the active step-7 production graphs and removes
-transient fp32/source variants from `public/models`, leaving the same five files
-the runtime expects.
+`moss:steps` writes only the active step-7 production graphs, embeds external
+weight data into the active ONNX files, rewrites the runtime metadata, and
+removes transient fp32/source variants from `public/models`.
 
 ## Protocol Fit
 
