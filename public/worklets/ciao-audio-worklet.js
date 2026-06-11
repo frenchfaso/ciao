@@ -36,13 +36,13 @@ class CiaoPlaybackProcessor extends AudioWorkletProcessor {
     this.current = null;
     this.offset = 0;
     this.lastOutput = 0;
-    this.previousTail = null;
     this.rampStart = 0;
     this.rampOffset = 0;
     this.rampSamples = 0;
-    this.crossfadeSamples = Math.max(1, Math.round(sampleRate * 0.004));
+    this.wasUnderrun = true;
+    this.rampInSamples = Math.max(1, Math.round(sampleRate * 0.002));
     this.silenceRampOffset = 0;
-    this.silenceRampSamples = this.crossfadeSamples;
+    this.silenceRampSamples = Math.max(1, Math.round(sampleRate * 0.002));
     this.port.onmessage = (event) => {
       this.queue.push(event.data);
     };
@@ -57,11 +57,10 @@ class CiaoPlaybackProcessor extends AudioWorkletProcessor {
 
     for (let i = 0; i < output.length; i += 1) {
       if (this.current && this.offset >= this.current.length) {
-        const tailSamples = Math.min(this.crossfadeSamples, this.current.length);
-        this.previousTail = this.current.slice(this.current.length - tailSamples);
         this.current = null;
         this.offset = 0;
         this.silenceRampOffset = 0;
+        this.port.postMessage({ type: 'played' });
       }
 
       if (!this.current && this.queue.length > 0) {
@@ -70,31 +69,28 @@ class CiaoPlaybackProcessor extends AudioWorkletProcessor {
         if (this.current) {
           this.rampStart = this.lastOutput;
           this.rampOffset = 0;
-          this.rampSamples = Math.min(this.current.length, this.previousTail ? this.previousTail.length : Math.round(sampleRate * 0.004));
+          this.rampSamples = this.wasUnderrun ? Math.min(this.current.length, this.rampInSamples) : 0;
           this.silenceRampOffset = 0;
+          this.wasUnderrun = false;
         } else {
-          this.previousTail = null;
           this.rampOffset = 0;
           this.rampSamples = 0;
         }
-      } else if (!this.current) {
-        this.previousTail = null;
       }
 
       let sample = this.current ? this.current[this.offset] : 0;
       if (this.current && this.rampOffset < this.rampSamples) {
         const alpha = (this.rampOffset + 1) / this.rampSamples;
-        const previous = this.previousTail?.[this.rampOffset] ?? this.rampStart;
-        sample = previous * (1 - alpha) + sample * alpha;
+        sample = this.rampStart * (1 - alpha) + sample * alpha;
         this.rampOffset += 1;
-        if (this.rampOffset >= this.rampSamples) {
-          this.previousTail = null;
-        }
       }
       if (!this.current && this.silenceRampOffset < this.silenceRampSamples) {
         const alpha = (this.silenceRampOffset + 1) / this.silenceRampSamples;
         sample = this.lastOutput * (1 - alpha);
         this.silenceRampOffset += 1;
+        this.wasUnderrun = true;
+      } else if (!this.current) {
+        this.wasUnderrun = true;
       }
 
       output[i] = sample;

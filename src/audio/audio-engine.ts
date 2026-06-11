@@ -1,19 +1,17 @@
 import { CODEC_FRAME_MS, type CiaoCodec } from './codec';
 import { type RemoteAudioFrame } from '../webrtc/streaming';
 
-const AUDIO_WORKLET_URL = '/worklets/ciao-audio-worklet.js?v=7';
+const AUDIO_WORKLET_URL = '/worklets/ciao-audio-worklet.js?v=8';
 const MAX_PENDING_CAPTURE_FRAMES = 3;
 const MIN_REMOTE_BUFFER_TARGET_FRAMES = 2;
 const MAX_REMOTE_BUFFER_TARGET_FRAMES = 3;
+const MAX_PLAYBACK_QUEUED_FRAMES = 3;
 const MAX_REMOTE_BUFFER_FRAMES = 12;
 const REMOTE_BUFFER_TARGET_UPDATE_MS = 1_000;
 const REMOTE_BUFFER_TARGET_RELAX_MS = 8_000;
 const REMOTE_JITTER_GROW_MS = CODEC_FRAME_MS * 0.7;
 const REMOTE_JITTER_SHRINK_MS = CODEC_FRAME_MS * 0.3;
 const REMOTE_STATS_IDLE_RESET_MS = 2_000;
-const REMOTE_DECODE_LEAD_MIN_MS = Math.min(64, CODEC_FRAME_MS * 0.75);
-const REMOTE_DECODE_LEAD_MAX_MS = Math.min(76, CODEC_FRAME_MS * 0.95);
-const REMOTE_DECODE_LEAD_SAFETY_MS = 48;
 const REMOTE_MISSING_RETRY_MS = Math.min(24, CODEC_FRAME_MS / 16);
 const REMOTE_MISSING_RETRY_LIMIT = 8;
 
@@ -65,6 +63,7 @@ export class CiaoAudioEngine {
   private wasSpeaking = false;
   private lastDtxAt = 0;
   private remoteBuffer = new Map<number, RemoteAudioFrame>();
+  private playbackQueuedFrames = 0;
   private expectedRemoteSequence: number | null = null;
   private remoteDtxSequence: number | null = null;
   private remotePlayoutTimer: number | undefined;
@@ -79,7 +78,6 @@ export class CiaoAudioEngine {
   private lastRemoteTargetUpdateAt = 0;
   private remoteStableSince = 0;
   private remoteLateWaits = 0;
-  private remoteDecodeLeadMs = REMOTE_DECODE_LEAD_MIN_MS;
   private failed = false;
   private pendingCaptureFrames = 0;
   private droppedCaptureFrames = 0;
@@ -214,7 +212,7 @@ export class CiaoAudioEngine {
 
       this.updateRemoteBufferTarget();
 
-      if (this.remoteBuffer.size >= this.targetRemoteBufferFrames) {
+      if (this.shouldPumpRemotePlayout()) {
         this.scheduleRemotePlayout(0);
       }
     } catch (error) {
@@ -265,6 +263,16 @@ export class CiaoAudioEngine {
         numberOfOutputs: 1,
         outputChannelCount: [1],
       });
+      this.playbackNode.port.onmessage = (event: MessageEvent<{ type?: string }>) => {
+        if (event.data?.type !== 'played') {
+          return;
+        }
+
+        this.playbackQueuedFrames = Math.max(0, this.playbackQueuedFrames - 1);
+        if (this.shouldPumpRemotePlayout()) {
+          this.scheduleRemotePlayout(0);
+        }
+      };
       this.playbackNode.connect(context.destination);
       return context;
     })();
@@ -411,7 +419,15 @@ export class CiaoAudioEngine {
       return null;
     }
 
-    return decodedRealFrame ? this.nextRemoteDecodeDelay() : CODEC_FRAME_MS;
+    if (
+      decodedRealFrame &&
+      this.playbackQueuedFrames < MAX_PLAYBACK_QUEUED_FRAMES &&
+      this.remoteBuffer.has(this.expectedRemoteSequence)
+    ) {
+      return 0;
+    }
+
+    return null;
   }
 
   private fail(error: unknown) {
@@ -431,25 +447,12 @@ export class CiaoAudioEngine {
     const startedAt = performance.now();
     const decoded = await this.codec.decode(packet, sampleRate);
     const durationMs = performance.now() - startedAt;
-    this.updateRemoteDecodeLead(durationMs);
     this.onPerformance({
       kind: 'decode',
       durationMs,
       remoteBufferFrames: this.remoteBuffer.size,
     });
     return decoded;
-  }
-
-  private updateRemoteDecodeLead(durationMs: number) {
-    const targetLead = Math.max(
-      REMOTE_DECODE_LEAD_MIN_MS,
-      Math.min(REMOTE_DECODE_LEAD_MAX_MS, durationMs + REMOTE_DECODE_LEAD_SAFETY_MS),
-    );
-    this.remoteDecodeLeadMs = this.remoteDecodeLeadMs * 0.7 + targetLead * 0.3;
-  }
-
-  private nextRemoteDecodeDelay() {
-    return Math.max(0, CODEC_FRAME_MS - this.remoteDecodeLeadMs);
   }
 
   private copyLastFrame(sampleRate: number) {
@@ -464,6 +467,7 @@ export class CiaoAudioEngine {
 
   private postPlaybackFrame(frame: Float32Array) {
     const playbackFrame = new Float32Array(frame);
+    this.playbackQueuedFrames += 1;
     this.playbackNode?.port.postMessage(playbackFrame, [playbackFrame.buffer]);
   }
 
@@ -474,6 +478,7 @@ export class CiaoAudioEngine {
     }
 
     this.remotePlayoutRunning = false;
+    this.playbackQueuedFrames = 0;
     this.expectedRemoteSequence = null;
     this.remoteDtxSequence = null;
     this.consecutiveLosses = 0;
@@ -585,7 +590,21 @@ export class CiaoAudioEngine {
     this.lastRemoteTargetUpdateAt = 0;
     this.remoteStableSince = 0;
     this.remoteLateWaits = 0;
-    this.remoteDecodeLeadMs = REMOTE_DECODE_LEAD_MIN_MS;
+  }
+
+  private shouldPumpRemotePlayout() {
+    if (this.expectedRemoteSequence === null || this.remotePlayoutTimer !== undefined || this.remotePlayoutRunning) {
+      return false;
+    }
+
+    if (this.playbackQueuedFrames >= MAX_PLAYBACK_QUEUED_FRAMES) {
+      return false;
+    }
+
+    return (
+      this.remoteBuffer.has(this.expectedRemoteSequence) &&
+      (this.playbackQueuedFrames > 0 || this.remoteBuffer.size >= this.targetRemoteBufferFrames)
+    );
   }
 }
 
