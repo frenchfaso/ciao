@@ -6,7 +6,7 @@
 
 **A tiny offline-first PWA for very-low-bandwidth peer-to-peer voice chat.**
 
-Share a link, connect through WebRTC DataChannel, and stream MOSS neural audio
+Share a link, connect through WebRTC DataChannel, and stream Mimi neural audio
 tokens instead of using the browser VoIP media stack.
 
 </div>
@@ -18,7 +18,7 @@ tokens instead of using the browser VoIP media stack.
 - ephemeral signaling rooms
 - P2P audio over `RTCDataChannel`
 - server echo test for setup checks
-- MOSS Audio Tokenizer Nano on WebGPU only
+- Mimi streaming codec on WebGPU only
 - no PCM fallback
 
 ## Development
@@ -34,9 +34,20 @@ so `node_modules` and build tooling stay off the host checkout.
 
 ## Deploy
 
+Local or LAN:
+
 ```sh
-podman compose -f compose.cloudflare.yml up -d --build
+podman compose up -d --build
+```
+
+Optional Cloudflare Tunnel:
+
+```sh
+cp .env.example .env
+podman compose -f compose.yml -f compose.cloudflare.yml up -d --build
 ```
 
 The deploy image contains the built PWA, the Go signaling/echo server, and one
-vendored MOSS encoder/decoder pair.
+vendored Mimi encoder/decoder pair. Cloudflare is optional; keep tunnel tokens
+in `.env`, which is ignored by git. Configure the Cloudflare public hostname in
+the Cloudflare dashboard and point it to `http://ciao:8080`.

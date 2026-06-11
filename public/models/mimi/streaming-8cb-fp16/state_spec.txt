@@ -1,0 +1,29 @@
+# Conv state specs for streaming ONNX model
+# num_codebooks=8
+# Format: type name channels temporal_size
+
+[encoder]
+conv enc_0 1 6
+conv enc_1_b1 64 2
+conv enc_3 64 4
+conv enc_4_b1 128 2
+conv enc_6 128 5
+conv enc_7_b1 256 2
+conv enc_9 256 6
+conv enc_10_b1 512 2
+conv enc_12 512 8
+conv enc_14 1024 2
+conv ds 512 2
+
+[decoder]
+conv_tr us 512 2
+conv dec_0 512 6
+conv_tr dec_2 512 8
+conv dec_3_b1 512 2
+conv_tr dec_5 256 6
+conv dec_6_b1 256 2
+conv_tr dec_8 128 5
+conv dec_9_b1 128 2
+conv_tr dec_11 64 4
+conv dec_12_b1 64 2
+conv dec_14 64 2

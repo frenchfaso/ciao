@@ -9,6 +9,8 @@ dist/
 !.env.example
 public/ort/*
 !public/ort/.gitkeep
+public/models/**/*.onnx
+public/models/**/*.onnx.tmp
 .DS_Store
 *.local
 __pycache__/

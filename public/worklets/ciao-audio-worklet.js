@@ -35,6 +35,12 @@ class CiaoPlaybackProcessor extends AudioWorkletProcessor {
     this.queue = [];
     this.current = null;
     this.offset = 0;
+    this.lastOutput = 0;
+    this.previousTail = null;
+    this.rampStart = 0;
+    this.rampOffset = 0;
+    this.rampSamples = 0;
+    this.crossfadeSamples = 0;
     this.port.onmessage = (event) => {
       this.queue.push(event.data);
     };
@@ -49,11 +55,37 @@ class CiaoPlaybackProcessor extends AudioWorkletProcessor {
 
     for (let i = 0; i < output.length; i += 1) {
       if (!this.current || this.offset >= this.current.length) {
+        if (this.current && this.current.length > 0) {
+          const tailSamples = Math.min(this.crossfadeSamples, this.current.length);
+          this.previousTail = this.current.slice(this.current.length - tailSamples);
+        }
+
         this.current = this.queue.shift() ?? null;
         this.offset = 0;
+        if (this.current) {
+          this.rampStart = this.lastOutput;
+          this.rampOffset = 0;
+          this.rampSamples = Math.min(this.current.length, this.previousTail ? this.previousTail.length : Math.round(sampleRate * 0.004));
+        } else {
+          this.previousTail = null;
+          this.rampOffset = 0;
+          this.rampSamples = 0;
+        }
       }
 
-      output[i] = this.current ? this.current[this.offset] : 0;
+      let sample = this.current ? this.current[this.offset] : 0;
+      if (this.current && this.rampOffset < this.rampSamples) {
+        const alpha = (this.rampOffset + 1) / this.rampSamples;
+        const previous = this.previousTail?.[this.rampOffset] ?? this.rampStart;
+        sample = previous * (1 - alpha) + sample * alpha;
+        this.rampOffset += 1;
+        if (this.rampOffset >= this.rampSamples) {
+          this.previousTail = null;
+        }
+      }
+
+      output[i] = sample;
+      this.lastOutput = sample;
       this.offset += 1;
     }
 

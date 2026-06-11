@@ -1,19 +1,6 @@
+# Optional override. Use with:
+# podman compose -f compose.yml -f compose.cloudflare.yml up -d --build
 services:
-  ciao:
-    image: ciao:latest
-    build:
-      context: .
-    container_name: ciao-deploy
-    restart: unless-stopped
-    ports:
-      - "8080:8080"
-    healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/healthz"]
-      interval: 30s
-      timeout: 3s
-      start_period: 5s
-      retries: 3
-
   cloudflared:
     image: cloudflare/cloudflared:latest
     container_name: ciao-cloudflared

@@ -1,6 +1,6 @@
 import { CIAO_ACTIVE_CODEC } from '../audio/codec';
 
-export const CIAO_PROTOCOL = `ciao/${CIAO_ACTIVE_CODEC.id}/v6/s${CIAO_ACTIVE_CODEC.tokenSteps}/cb${CIAO_ACTIVE_CODEC.codebooks}`;
+export const CIAO_PROTOCOL = `ciao/${CIAO_ACTIVE_CODEC.id}/v9/s${CIAO_ACTIVE_CODEC.tokenSteps}/cb${CIAO_ACTIVE_CODEC.codebooks}`;
 
 const MAGIC = 0x4349414f;
 const VERSION = 1;
@@ -8,7 +8,6 @@ const HEADER_BYTES = 16;
 
 export enum CiaoFrameType {
   Hello = 1,
-  Audio = 2,
   State = 3,
   Bye = 4,
 }
@@ -65,7 +64,6 @@ export function decodeFrame(data: ArrayBuffer): CiaoFrame | null {
 function isFrameType(value: number): value is CiaoFrameType {
   return (
     value === CiaoFrameType.Hello ||
-    value === CiaoFrameType.Audio ||
     value === CiaoFrameType.State ||
     value === CiaoFrameType.Bye
   );

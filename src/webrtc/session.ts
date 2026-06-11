@@ -1,11 +1,12 @@
 import type { PeerSignal } from './signaling';
-import { CIAO_ACTIVE_CODEC, CODEC_CODE_BYTES, CODEC_FRAME_MS } from '../audio/codec';
+import { CIAO_ACTIVE_CODEC, CODEC_CODE_BYTES, CODEC_FRAME_MS, CODEC_PACKET_BYTES } from '../audio/codec';
 import { CIAO_PROTOCOL, CiaoFrameType, decodeFrame, encodeFrame } from './protocol';
 import {
+  MAX_AUDIO_AGGREGATION,
   clampAggregation,
-  decodeAudioPayload,
+  decodeAudioPacket,
   decodeStreamFeedback,
-  encodeAudioPayload,
+  encodeAudioPacket,
   encodeStreamFeedback,
   type RemoteAudioFrame,
 } from './streaming';
@@ -26,6 +27,10 @@ const rtcConfig: RTCConfiguration = {
   iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
 };
 const HELLO_TIMEOUT_MS = 3_000;
+const AUDIO_SEND_DROP_BUFFER_BYTES = 128_000;
+const AUDIO_SEND_AGGREGATE_BUFFER_BYTES = 48_000;
+const AUDIO_SEND_DEAGGREGATE_BUFFER_BYTES = 12_000;
+const AUDIO_FEEDBACK_INTERVAL_MS = 1_000;
 
 export class CiaoPeerSession {
   private readonly peer: RTCPeerConnection;
@@ -118,7 +123,7 @@ export class CiaoPeerSession {
 
   sendDtx() {
     this.flushAudioQueue();
-    this.sendAudioPayload([], { dtx: true });
+    this.sendAudioPacket([], { dtx: true });
   }
 
   close() {
@@ -172,17 +177,20 @@ export class CiaoPeerSession {
         return;
       }
 
+      const packet = decodeAudioPacket(new Uint8Array(event.data));
+      if (packet) {
+        if (this.channelReady) {
+          this.handleAudioPacket(packet);
+        }
+        return;
+      }
+
       const frame = decodeFrame(event.data);
       if (!frame) {
         return;
       }
 
-      if (frame.type === CiaoFrameType.Audio) {
-        if (!this.channelReady) {
-          return;
-        }
-        this.handleAudioFrame(frame.sequence, frame.timestamp, frame.payload);
-      } else if (frame.type === CiaoFrameType.State) {
+      if (frame.type === CiaoFrameType.State) {
         if (!this.channelReady) {
           return;
         }
@@ -202,7 +210,7 @@ export class CiaoPeerSession {
 
     this.clearAudioFlushTimer();
     const frames = this.audioQueue.splice(0, this.audioAggregation);
-    this.sendAudioPayload(frames);
+    this.sendAudioPacket(frames);
 
     if (this.audioQueue.length > 0) {
       this.scheduleAudioFlush();
@@ -229,40 +237,28 @@ export class CiaoPeerSession {
     this.audioFlushTimer = undefined;
   }
 
-  private sendAudioPayload(frames: Uint8Array[], options: { dtx?: boolean } = {}) {
+  private sendAudioPacket(frames: Uint8Array[], options: { dtx?: boolean } = {}) {
     if (!this.channel || this.channel.readyState !== 'open') {
       return;
     }
 
     const baseSequence = this.audioFrameSequence;
-    const payload = encodeAudioPayload(frames, options);
-    const packet = encodeFrame({
-      type: CiaoFrameType.Audio,
-      sequence: baseSequence,
-      timestamp: audioTimestamp(),
-      payload,
-    });
+    const packet = encodeAudioPacket(baseSequence, frames, options);
 
     if (frames.length > 0) {
       this.audioFrameSequence = (this.audioFrameSequence + frames.length) >>> 0;
     }
 
-    if (this.channel.bufferedAmount < 128_000) {
+    if (this.channel.bufferedAmount < AUDIO_SEND_DROP_BUFFER_BYTES) {
       this.channel.send(packet);
     } else if (frames.length > 0) {
       this.options.onLocalAudioDrop(frames.length);
     }
   }
 
-  private handleAudioFrame(baseSequence: number, timestamp: number, payload: Uint8Array) {
-    const packet = decodeAudioPayload(payload);
-
-    if (!packet) {
-      return;
-    }
-
+  private handleAudioPacket(packet: NonNullable<ReturnType<typeof decodeAudioPacket>>) {
     if (packet.dtx) {
-      this.options.onRemoteDtx(baseSequence);
+      this.options.onRemoteDtx(packet.sequence);
     }
 
     if (packet.frames.length === 0) {
@@ -271,8 +267,8 @@ export class CiaoPeerSession {
 
     const now = performance.now();
     const frames = packet.frames.map((frame, index) => ({
-      sequence: (baseSequence + index) >>> 0,
-      sentAt: timestamp,
+      sequence: (packet.sequence + index) >>> 0,
+      sentAt: 0,
       receivedAt: now,
       payload: frame,
     }));
@@ -322,7 +318,7 @@ export class CiaoPeerSession {
   }
 
   private maybeSendStreamFeedback(now: number) {
-    if (now - this.lastFeedbackAt < 1_000 || this.highestReceivedAudioSequence === null) {
+    if (now - this.lastFeedbackAt < AUDIO_FEEDBACK_INTERVAL_MS || this.highestReceivedAudioSequence === null) {
       return;
     }
 
@@ -341,7 +337,7 @@ export class CiaoPeerSession {
       lostFrames: this.lostFramesWindow,
       jitterMs: this.jitterMs,
       bufferFrames: this.options.getReceiveBufferDepth(),
-      targetAggregation: this.audioAggregation,
+      targetAggregation: this.recommendedRemoteAggregation(),
     });
 
     this.receivedFramesWindow = 0;
@@ -368,14 +364,48 @@ export class CiaoPeerSession {
     const totalFrames = feedback.receivedFrames + feedback.lostFrames;
     const lossRate = totalFrames > 0 ? feedback.lostFrames / totalFrames : 0;
     const buffered = this.channel?.bufferedAmount ?? 0;
+    const requestedAggregation = clampAggregation(feedback.targetAggregation);
 
-    if (buffered > 64_000 || lossRate > 0.1 || feedback.jitterMs > CODEC_FRAME_MS * 1.1) {
-      this.audioAggregation = 2;
-    } else {
+    if (lossRate > 0.15) {
       this.audioAggregation = 1;
+      return;
+    }
+
+    const shouldGrow =
+      buffered > AUDIO_SEND_AGGREGATE_BUFFER_BYTES ||
+      (requestedAggregation > this.audioAggregation && lossRate < 0.05);
+    const shouldShrink =
+      buffered < AUDIO_SEND_DEAGGREGATE_BUFFER_BYTES &&
+      requestedAggregation < this.audioAggregation &&
+      lossRate === 0 &&
+      feedback.jitterMs < CODEC_FRAME_MS * 0.45;
+
+    if (shouldGrow) {
+      this.audioAggregation += 1;
+    } else if (shouldShrink) {
+      this.audioAggregation -= 1;
     }
 
     this.audioAggregation = clampAggregation(this.audioAggregation);
+  }
+
+  private recommendedRemoteAggregation() {
+    const totalFrames = this.receivedFramesWindow + this.lostFramesWindow;
+    const lossRate = totalFrames > 0 ? this.lostFramesWindow / totalFrames : 0;
+
+    if (lossRate > 0.08) {
+      return 1;
+    }
+
+    if (this.jitterMs > CODEC_FRAME_MS * 1.25 || this.options.getReceiveBufferDepth() >= 3) {
+      return 3;
+    }
+
+    if (this.jitterMs > CODEC_FRAME_MS * 0.75 || this.options.getReceiveBufferDepth() >= 2) {
+      return 2;
+    }
+
+    return 1;
   }
 
   private sendHello() {
@@ -389,7 +419,7 @@ export class CiaoPeerSession {
         protocol: CIAO_PROTOCOL,
         codec: CIAO_ACTIVE_CODEC.id,
         bitrate: CIAO_ACTIVE_CODEC.bitrate,
-        moss: {
+        codecConfig: {
           sampleRate: CIAO_ACTIVE_CODEC.sampleRate,
           tokenStepMs: CIAO_ACTIVE_CODEC.tokenStepMs,
           tokenStepSamples: CIAO_ACTIVE_CODEC.tokenStepSamples,
@@ -401,8 +431,9 @@ export class CiaoPeerSession {
           codebooks: CIAO_ACTIVE_CODEC.codebooks,
           bitsPerCode: CIAO_ACTIVE_CODEC.bitsPerCode,
           codeBytes: CODEC_CODE_BYTES,
+          packetBytes: CODEC_PACKET_BYTES,
         },
-        aggregation: [1, 2],
+        aggregation: [1, MAX_AUDIO_AGGREGATION],
         dtx: true,
         jitterBufferMs: CODEC_FRAME_MS,
       }),
@@ -482,7 +513,7 @@ function isCompatibleHello(value: unknown) {
     protocol?: unknown;
     codec?: unknown;
     bitrate?: unknown;
-    moss?: Partial<Record<
+    codecConfig?: Partial<Record<
       | 'sampleRate'
       | 'tokenStepMs'
       | 'tokenStepSamples'
@@ -493,7 +524,8 @@ function isCompatibleHello(value: unknown) {
       | 'modelCodebooks'
       | 'codebooks'
       | 'bitsPerCode'
-      | 'codeBytes',
+      | 'codeBytes'
+      | 'packetBytes',
       unknown
     >>;
   };
@@ -502,16 +534,17 @@ function isCompatibleHello(value: unknown) {
     hello.protocol === CIAO_PROTOCOL &&
     hello.codec === CIAO_ACTIVE_CODEC.id &&
     hello.bitrate === CIAO_ACTIVE_CODEC.bitrate &&
-    hello.moss?.sampleRate === CIAO_ACTIVE_CODEC.sampleRate &&
-    hello.moss?.tokenStepMs === CIAO_ACTIVE_CODEC.tokenStepMs &&
-    hello.moss?.tokenStepSamples === CIAO_ACTIVE_CODEC.tokenStepSamples &&
-    hello.moss?.tokenSteps === CIAO_ACTIVE_CODEC.tokenSteps &&
-    hello.moss?.inputSamples === CIAO_ACTIVE_CODEC.inputSamples &&
-    hello.moss?.playoutSamples === CIAO_ACTIVE_CODEC.playoutSamples &&
-    hello.moss?.rawDecoderSamples === CIAO_ACTIVE_CODEC.rawDecoderSamples &&
-    hello.moss?.modelCodebooks === CIAO_ACTIVE_CODEC.modelCodebooks &&
-    hello.moss?.codebooks === CIAO_ACTIVE_CODEC.codebooks &&
-    hello.moss?.bitsPerCode === CIAO_ACTIVE_CODEC.bitsPerCode &&
-    hello.moss?.codeBytes === CODEC_CODE_BYTES
+    hello.codecConfig?.sampleRate === CIAO_ACTIVE_CODEC.sampleRate &&
+    hello.codecConfig?.tokenStepMs === CIAO_ACTIVE_CODEC.tokenStepMs &&
+    hello.codecConfig?.tokenStepSamples === CIAO_ACTIVE_CODEC.tokenStepSamples &&
+    hello.codecConfig?.tokenSteps === CIAO_ACTIVE_CODEC.tokenSteps &&
+    hello.codecConfig?.inputSamples === CIAO_ACTIVE_CODEC.inputSamples &&
+    hello.codecConfig?.playoutSamples === CIAO_ACTIVE_CODEC.playoutSamples &&
+    hello.codecConfig?.rawDecoderSamples === CIAO_ACTIVE_CODEC.rawDecoderSamples &&
+    hello.codecConfig?.modelCodebooks === CIAO_ACTIVE_CODEC.modelCodebooks &&
+    hello.codecConfig?.codebooks === CIAO_ACTIVE_CODEC.codebooks &&
+    hello.codecConfig?.bitsPerCode === CIAO_ACTIVE_CODEC.bitsPerCode &&
+    hello.codecConfig?.codeBytes === CODEC_CODE_BYTES &&
+    hello.codecConfig?.packetBytes === CODEC_PACKET_BYTES
   );
 }

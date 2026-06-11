@@ -1,7 +1,7 @@
 import { CODEC_FRAME_MS, type CiaoCodec } from './codec';
 import { type RemoteAudioFrame } from '../webrtc/streaming';
 
-const AUDIO_WORKLET_URL = '/worklets/ciao-audio-worklet.js?v=3';
+const AUDIO_WORKLET_URL = '/worklets/ciao-audio-worklet.js?v=6';
 const MAX_PENDING_CAPTURE_FRAMES = 3;
 const MIN_REMOTE_BUFFER_TARGET_FRAMES = 1;
 const MAX_REMOTE_BUFFER_TARGET_FRAMES = 3;
@@ -11,6 +11,11 @@ const REMOTE_BUFFER_TARGET_RELAX_MS = 8_000;
 const REMOTE_JITTER_GROW_MS = CODEC_FRAME_MS * 0.7;
 const REMOTE_JITTER_SHRINK_MS = CODEC_FRAME_MS * 0.3;
 const REMOTE_STATS_IDLE_RESET_MS = 2_000;
+const REMOTE_DECODE_LEAD_MIN_MS = Math.min(80, CODEC_FRAME_MS * 0.25);
+const REMOTE_DECODE_LEAD_MAX_MS = CODEC_FRAME_MS * 0.75;
+const REMOTE_DECODE_LEAD_SAFETY_MS = 32;
+const REMOTE_MISSING_RETRY_MS = Math.min(24, CODEC_FRAME_MS / 16);
+const REMOTE_MISSING_RETRY_LIMIT = 8;
 
 export type AudioPerformanceSample =
   | {
@@ -73,6 +78,7 @@ export class CiaoAudioEngine {
   private lastRemoteTargetUpdateAt = 0;
   private remoteStableSince = 0;
   private remoteLateWaits = 0;
+  private remoteDecodeLeadMs = REMOTE_DECODE_LEAD_MIN_MS;
   private failed = false;
   private pendingCaptureFrames = 0;
   private droppedCaptureFrames = 0;
@@ -337,6 +343,7 @@ export class CiaoAudioEngine {
       const sequence = this.expectedRemoteSequence;
       const buffered = this.remoteBuffer.get(sequence);
       let decoded: Float32Array;
+      let decodedRealFrame = false;
 
       if (buffered) {
         this.remoteBuffer.delete(sequence);
@@ -344,6 +351,7 @@ export class CiaoAudioEngine {
         this.lastDecodedFrame = decoded;
         this.consecutiveLosses = 0;
         this.remoteLateWaits = 0;
+        decodedRealFrame = true;
       } else if (
         this.remoteDtxSequence !== null &&
         sequence >= this.remoteDtxSequence &&
@@ -352,11 +360,9 @@ export class CiaoAudioEngine {
         this.stopRemotePlayout();
         return;
       } else {
-        if (this.remoteLateWaits < 1 && this.remoteBuffer.size < this.targetRemoteBufferFrames) {
+        if (this.remoteLateWaits < REMOTE_MISSING_RETRY_LIMIT && this.remoteBuffer.size < this.targetRemoteBufferFrames) {
           this.remoteLateWaits += 1;
-          this.remoteUnderrunsWindow += 1;
-          this.updateRemoteBufferTarget(performance.now(), true);
-          this.scheduleRemotePlayout(CODEC_FRAME_MS / 2);
+          this.scheduleRemotePlayout(REMOTE_MISSING_RETRY_MS);
           return;
         }
 
@@ -382,7 +388,7 @@ export class CiaoAudioEngine {
         return;
       }
 
-      this.scheduleRemotePlayout(CODEC_FRAME_MS);
+      this.scheduleRemotePlayout(decodedRealFrame ? this.nextRemoteDecodeDelay() : CODEC_FRAME_MS);
     } catch (error) {
       this.fail(error);
     }
@@ -404,12 +410,26 @@ export class CiaoAudioEngine {
   private async decodeTimed(packet: Uint8Array, sampleRate: number) {
     const startedAt = performance.now();
     const decoded = await this.codec.decode(packet, sampleRate);
+    const durationMs = performance.now() - startedAt;
+    this.updateRemoteDecodeLead(durationMs);
     this.onPerformance({
       kind: 'decode',
-      durationMs: performance.now() - startedAt,
+      durationMs,
       remoteBufferFrames: this.remoteBuffer.size,
     });
     return decoded;
+  }
+
+  private updateRemoteDecodeLead(durationMs: number) {
+    const targetLead = Math.max(
+      REMOTE_DECODE_LEAD_MIN_MS,
+      Math.min(REMOTE_DECODE_LEAD_MAX_MS, durationMs + REMOTE_DECODE_LEAD_SAFETY_MS),
+    );
+    this.remoteDecodeLeadMs = this.remoteDecodeLeadMs * 0.7 + targetLead * 0.3;
+  }
+
+  private nextRemoteDecodeDelay() {
+    return Math.max(0, CODEC_FRAME_MS - this.remoteDecodeLeadMs);
   }
 
   private copyLastFrame(sampleRate: number) {
@@ -544,6 +564,7 @@ export class CiaoAudioEngine {
     this.lastRemoteTargetUpdateAt = 0;
     this.remoteStableSince = 0;
     this.remoteLateWaits = 0;
+    this.remoteDecodeLeadMs = REMOTE_DECODE_LEAD_MIN_MS;
   }
 }
 

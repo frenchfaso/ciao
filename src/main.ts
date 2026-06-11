@@ -3,7 +3,13 @@ import { registerSW } from 'virtual:pwa-register';
 import './styles.css';
 import { CIAO_ACTIVE_CODEC, CODEC_FRAME_MS, type CodecModelCacheProgress } from './audio/codec';
 import { CiaoAudioEngine, requestMicrophoneStream, type AudioPerformanceSample } from './audio/audio-engine';
-import { createCodec, prepareCodecRuntime, warmMossModelCache } from './audio/moss-codec';
+import {
+  createCodec,
+  isCodecPrewarmed,
+  prepareCodecRuntime,
+  prewarmCodec,
+  warmMimiModelCache as warmCodecModelCache,
+} from './audio/mimi-codec';
 import { CiaoServerEcho } from './webrtc/server-echo';
 import { CiaoPeerSession } from './webrtc/session';
 import {
@@ -16,7 +22,7 @@ import {
 } from './webrtc/signaling';
 
 type Role = 'idle' | 'echo' | SignalRole;
-type ModelStatus = 'checking' | 'downloading' | 'initializing' | 'ready' | 'unsupported' | 'error';
+type ModelStatus = 'checking' | 'downloading' | 'initializing' | 'warming' | 'ready' | 'unsupported' | 'error';
 type NavigatorWithStandalone = Navigator & {
   standalone?: boolean;
 };
@@ -27,6 +33,7 @@ type AppState = {
   modelStatus: ModelStatus;
   modelProgress: number;
   modelError: string;
+  codecPrewarmed: boolean;
   pwaInstalled: boolean;
   connection: RTCPeerConnectionState | 'idle';
   channelOpen: boolean;
@@ -64,6 +71,7 @@ const state: AppState = {
   modelStatus: 'checking',
   modelProgress: 0,
   modelError: '',
+  codecPrewarmed: false,
   pwaInstalled: isPwaInstalled(),
   connection: 'idle',
   channelOpen: false,
@@ -99,6 +107,7 @@ let lastCaptureDropAt = 0;
 let performancePressureStartedAt = 0;
 let performanceRecoveryStartedAt = 0;
 let codecPromise: Promise<void> | null = null;
+let codecWarmPromise: Promise<void> | null = null;
 let codecReady = false;
 
 const app = document.querySelector<HTMLDivElement>('#app');
@@ -155,6 +164,7 @@ function render() {
   appRoot.dataset.ciaoModelStatus = state.modelStatus;
   appRoot.dataset.ciaoModelProgress = String(modelPercent);
   appRoot.dataset.ciaoModelError = state.modelError;
+  appRoot.dataset.ciaoCodecPrewarmed = String(state.codecPrewarmed);
   appRoot.dataset.ciaoPwaInstalled = String(state.pwaInstalled);
   appRoot.dataset.ciaoConnection = state.connection;
   appRoot.dataset.ciaoChannelOpen = String(state.channelOpen);
@@ -473,6 +483,7 @@ function rebuildPeerSession() {
   state.channelOpen = false;
   state.micEnabled = false;
   resetPerformanceState();
+  warmIdleCodec();
 }
 
 async function handleMicPress() {
@@ -557,6 +568,7 @@ async function startEchoTest() {
       state.status = 'echo chiuso';
       resetPerformanceState();
       render();
+      warmIdleCodec();
     },
     onAudioFrames(frames) {
       if (serverEcho !== echo || state.role !== 'echo') {
@@ -598,6 +610,7 @@ async function startEchoTest() {
     state.status = error instanceof Error ? error.message : 'microfono non disponibile';
     resetPerformanceState();
     render();
+    warmIdleCodec();
   }
 }
 
@@ -613,6 +626,7 @@ async function ensureMicEnabled() {
       const voiceProcessing = state.role !== 'echo';
       await ensureCodecReady();
       const codec = await createCodec();
+      state.codecPrewarmed = false;
       micStream = await requestMicrophoneStream(voiceProcessing);
       let engine: CiaoAudioEngine;
       engine = new CiaoAudioEngine({
@@ -815,6 +829,7 @@ function resetCall(
   }
   render();
   applyPendingAppRefresh();
+  warmIdleCodec();
 }
 
 function applyPendingAppRefresh() {
@@ -831,30 +846,39 @@ function hasActiveRuntime() {
 }
 
 async function ensureCodecReady() {
-  if (codecReady) {
+  if (codecReady && state.codecPrewarmed && isCodecPrewarmed()) {
     return;
   }
 
-  if (!codecPromise) {
+  if (!codecReady && !codecPromise) {
     codecPromise = prepareCodec();
   }
 
-  return codecPromise;
+  if (!codecReady) {
+    return codecPromise;
+  }
+
+  return warmIdleCodec(true);
 }
 
 async function prepareCodec() {
   try {
+    state.codecPrewarmed = false;
     updateModelState('checking', state.modelProgress, '', true);
-    await warmMossModelCache((progress) => {
+    await warmCodecModelCache((progress) => {
       updateModelState(modelStatusFromCacheProgress(progress), progress.percent);
     });
     updateModelState('initializing', 1, '', true);
     await prepareCodecRuntime();
     codecReady = true;
+    updateModelState('warming', 1, '', true);
+    await warmIdleCodec(true);
     updateModelState('ready', 1, '', true);
   } catch (error) {
     codecReady = false;
     codecPromise = null;
+    codecWarmPromise = null;
+    state.codecPrewarmed = false;
     const message = error instanceof Error ? error.message : `${CIAO_ACTIVE_CODEC.label} non disponibile`;
     const lowerMessage = message.toLowerCase();
     updateModelState(
@@ -864,6 +888,46 @@ async function prepareCodec() {
       true,
     );
     throw error;
+  }
+}
+
+async function warmIdleCodec(wait = false) {
+  if (!codecReady || audio) {
+    return;
+  }
+
+  if (state.codecPrewarmed && isCodecPrewarmed()) {
+    return;
+  }
+
+  if (!codecWarmPromise) {
+    state.codecPrewarmed = false;
+    if (state.modelStatus === 'ready') {
+      updateModelState('warming', 1, '', true);
+    } else {
+      render();
+    }
+
+    codecWarmPromise = prewarmCodec()
+      .then(() => {
+        state.codecPrewarmed = isCodecPrewarmed();
+        if (state.codecPrewarmed) {
+          updateModelState('ready', 1, '', true);
+        } else {
+          render();
+        }
+      })
+      .catch((error: unknown) => {
+        console.warn('ciao codec warmup failed', error);
+        throw error;
+      })
+      .finally(() => {
+        codecWarmPromise = null;
+      });
+  }
+
+  if (wait) {
+    await codecWarmPromise;
   }
 }
 
@@ -897,7 +961,7 @@ function updateModelState(status: ModelStatus, progress: number, error = '', for
 }
 
 function isCodecReady() {
-  return state.modelStatus === 'ready' && codecReady;
+  return state.modelStatus === 'ready' && codecReady && state.codecPrewarmed && isCodecPrewarmed();
 }
 
 function modelStatusText() {
@@ -914,6 +978,10 @@ function modelStatusText() {
 
   if (state.modelStatus === 'error') {
     return `${CIAO_ACTIVE_CODEC.label} non disponibile`;
+  }
+
+  if (state.modelStatus === 'warming') {
+    return `${CIAO_ACTIVE_CODEC.label} warmup`;
   }
 
   return CIAO_ACTIVE_CODEC.label;
@@ -942,8 +1010,41 @@ function isPwaInstalled() {
 }
 
 async function copyText(value: string) {
-  await navigator.clipboard.writeText(value);
-  state.status = 'link copiato';
+  if (await writeClipboard(value)) {
+    state.status = 'link copiato';
+    return;
+  }
+
+  state.status = 'link nella barra indirizzi';
+}
+
+async function writeClipboard(value: string) {
+  try {
+    await navigator.clipboard.writeText(value);
+    return true;
+  } catch {
+    return copyTextWithSelection(value);
+  }
+}
+
+function copyTextWithSelection(value: string) {
+  const input = document.createElement('textarea');
+  input.value = value;
+  input.setAttribute('readonly', '');
+  input.style.position = 'fixed';
+  input.style.left = '-9999px';
+  input.style.top = '0';
+  document.body.append(input);
+  input.focus();
+  input.select();
+
+  try {
+    return document.execCommand('copy');
+  } catch {
+    return false;
+  } finally {
+    input.remove();
+  }
 }
 
 async function autoJoinRoomFromUrl() {

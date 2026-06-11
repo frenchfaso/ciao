@@ -165,7 +165,7 @@ func cachePolicy(urlPath string) string {
 	}
 
 	if strings.HasPrefix(urlPath, "/ort/") ||
-		strings.HasPrefix(urlPath, "/models/moss/audio-tokenizer-nano-onnx/") {
+		strings.HasPrefix(urlPath, "/models/mimi/streaming-8cb-fp16/") {
 		return "public, max-age=31536000, immutable"
 	}
 

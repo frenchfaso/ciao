@@ -1,5 +1,4 @@
-import { CiaoFrameType, decodeFrame, encodeFrame } from './protocol';
-import { decodeAudioPayload, encodeAudioPayload, type RemoteAudioFrame } from './streaming';
+import { decodeAudioPacket, encodeAudioPacket, type RemoteAudioFrame } from './streaming';
 
 type ServerEchoOptions = {
   onClose: () => void;
@@ -82,13 +81,7 @@ export class CiaoServerEcho {
     }
 
     const baseSequence = this.audioFrameSequence;
-    const payload = encodeAudioPayload([frame]);
-    const packet = encodeFrame({
-      type: CiaoFrameType.Audio,
-      sequence: baseSequence,
-      timestamp: audioTimestamp(),
-      payload,
-    });
+    const packet = encodeAudioPacket(baseSequence, [frame]);
 
     this.audioFrameSequence = (this.audioFrameSequence + 1) >>> 0;
     this.socket.send(packet);
@@ -110,12 +103,7 @@ export class CiaoServerEcho {
       return;
     }
 
-    const frame = decodeFrame(buffer);
-    if (!frame || frame.type !== CiaoFrameType.Audio) {
-      return;
-    }
-
-    const packet = decodeAudioPayload(frame.payload);
+    const packet = decodeAudioPacket(new Uint8Array(buffer));
     if (!packet || packet.frames.length === 0) {
       return;
     }
@@ -123,8 +111,8 @@ export class CiaoServerEcho {
     const now = performance.now();
     this.options.onAudioFrames(
       packet.frames.map((payload, index) => ({
-        sequence: (frame.sequence + index) >>> 0,
-        sentAt: frame.timestamp,
+        sequence: (packet.sequence + index) >>> 0,
+        sentAt: 0,
         receivedAt: now,
         payload,
       })),
@@ -148,8 +136,4 @@ function echoSocketUrl() {
   const url = new URL('/echo', location.href);
   url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
   return url;
-}
-
-function audioTimestamp() {
-  return Math.floor(performance.now()) >>> 0;
 }

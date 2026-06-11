@@ -11,6 +11,8 @@ dist
 .env.*
 public/ort/*
 !public/ort/.gitkeep
+public/models/**/*.onnx
+public/models/**/*.onnx.tmp
 .DS_Store
 npm-debug.log*
 __pycache__
