@@ -40,7 +40,9 @@ class CiaoPlaybackProcessor extends AudioWorkletProcessor {
     this.rampStart = 0;
     this.rampOffset = 0;
     this.rampSamples = 0;
-    this.crossfadeSamples = 0;
+    this.crossfadeSamples = Math.max(1, Math.round(sampleRate * 0.004));
+    this.silenceRampOffset = 0;
+    this.silenceRampSamples = this.crossfadeSamples;
     this.port.onmessage = (event) => {
       this.queue.push(event.data);
     };
@@ -54,23 +56,29 @@ class CiaoPlaybackProcessor extends AudioWorkletProcessor {
     }
 
     for (let i = 0; i < output.length; i += 1) {
-      if (!this.current || this.offset >= this.current.length) {
-        if (this.current && this.current.length > 0) {
-          const tailSamples = Math.min(this.crossfadeSamples, this.current.length);
-          this.previousTail = this.current.slice(this.current.length - tailSamples);
-        }
+      if (this.current && this.offset >= this.current.length) {
+        const tailSamples = Math.min(this.crossfadeSamples, this.current.length);
+        this.previousTail = this.current.slice(this.current.length - tailSamples);
+        this.current = null;
+        this.offset = 0;
+        this.silenceRampOffset = 0;
+      }
 
+      if (!this.current && this.queue.length > 0) {
         this.current = this.queue.shift() ?? null;
         this.offset = 0;
         if (this.current) {
           this.rampStart = this.lastOutput;
           this.rampOffset = 0;
           this.rampSamples = Math.min(this.current.length, this.previousTail ? this.previousTail.length : Math.round(sampleRate * 0.004));
+          this.silenceRampOffset = 0;
         } else {
           this.previousTail = null;
           this.rampOffset = 0;
           this.rampSamples = 0;
         }
+      } else if (!this.current) {
+        this.previousTail = null;
       }
 
       let sample = this.current ? this.current[this.offset] : 0;
@@ -83,10 +91,17 @@ class CiaoPlaybackProcessor extends AudioWorkletProcessor {
           this.previousTail = null;
         }
       }
+      if (!this.current && this.silenceRampOffset < this.silenceRampSamples) {
+        const alpha = (this.silenceRampOffset + 1) / this.silenceRampSamples;
+        sample = this.lastOutput * (1 - alpha);
+        this.silenceRampOffset += 1;
+      }
 
       output[i] = sample;
       this.lastOutput = sample;
-      this.offset += 1;
+      if (this.current) {
+        this.offset += 1;
+      }
     }
 
     return true;

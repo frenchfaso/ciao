@@ -1,9 +1,9 @@
 import { CODEC_FRAME_MS, type CiaoCodec } from './codec';
 import { type RemoteAudioFrame } from '../webrtc/streaming';
 
-const AUDIO_WORKLET_URL = '/worklets/ciao-audio-worklet.js?v=6';
+const AUDIO_WORKLET_URL = '/worklets/ciao-audio-worklet.js?v=7';
 const MAX_PENDING_CAPTURE_FRAMES = 3;
-const MIN_REMOTE_BUFFER_TARGET_FRAMES = 1;
+const MIN_REMOTE_BUFFER_TARGET_FRAMES = 2;
 const MAX_REMOTE_BUFFER_TARGET_FRAMES = 3;
 const MAX_REMOTE_BUFFER_FRAMES = 12;
 const REMOTE_BUFFER_TARGET_UPDATE_MS = 1_000;
@@ -11,9 +11,9 @@ const REMOTE_BUFFER_TARGET_RELAX_MS = 8_000;
 const REMOTE_JITTER_GROW_MS = CODEC_FRAME_MS * 0.7;
 const REMOTE_JITTER_SHRINK_MS = CODEC_FRAME_MS * 0.3;
 const REMOTE_STATS_IDLE_RESET_MS = 2_000;
-const REMOTE_DECODE_LEAD_MIN_MS = Math.min(80, CODEC_FRAME_MS * 0.25);
-const REMOTE_DECODE_LEAD_MAX_MS = CODEC_FRAME_MS * 0.75;
-const REMOTE_DECODE_LEAD_SAFETY_MS = 32;
+const REMOTE_DECODE_LEAD_MIN_MS = Math.min(64, CODEC_FRAME_MS * 0.75);
+const REMOTE_DECODE_LEAD_MAX_MS = Math.min(76, CODEC_FRAME_MS * 0.95);
+const REMOTE_DECODE_LEAD_SAFETY_MS = 48;
 const REMOTE_MISSING_RETRY_MS = Math.min(24, CODEC_FRAME_MS / 16);
 const REMOTE_MISSING_RETRY_LIMIT = 8;
 
@@ -68,6 +68,7 @@ export class CiaoAudioEngine {
   private expectedRemoteSequence: number | null = null;
   private remoteDtxSequence: number | null = null;
   private remotePlayoutTimer: number | undefined;
+  private remotePlayoutRunning = false;
   private lastDecodedFrame: Float32Array | null = null;
   private consecutiveLosses = 0;
   private targetRemoteBufferFrames = MIN_REMOTE_BUFFER_TARGET_FRAMES;
@@ -315,83 +316,102 @@ export class CiaoAudioEngine {
   }
 
   private scheduleRemotePlayout(delayMs: number = CODEC_FRAME_MS) {
-    if (this.remotePlayoutTimer !== undefined || this.expectedRemoteSequence === null) {
+    if (
+      this.remotePlayoutTimer !== undefined ||
+      this.remotePlayoutRunning ||
+      this.expectedRemoteSequence === null
+    ) {
       return;
     }
 
     this.remotePlayoutTimer = window.setTimeout(() => {
       this.remotePlayoutTimer = undefined;
-      void this.playRemoteTick();
+      void this.runRemotePlayoutTick();
     }, delayMs);
   }
 
-  private async playRemoteTick() {
-    if (this.failed) {
+  private async runRemotePlayoutTick() {
+    if (this.remotePlayoutRunning) {
       return;
     }
 
+    this.remotePlayoutRunning = true;
+    let nextDelayMs: number | null = null;
+
     try {
-      if (this.expectedRemoteSequence === null) {
-        return;
-      }
-
-      const context = await this.ensureContext();
-      if (this.failed) {
-        return;
-      }
-
-      const sequence = this.expectedRemoteSequence;
-      const buffered = this.remoteBuffer.get(sequence);
-      let decoded: Float32Array;
-      let decodedRealFrame = false;
-
-      if (buffered) {
-        this.remoteBuffer.delete(sequence);
-        decoded = await this.decodeTimed(buffered.payload, context.sampleRate);
-        this.lastDecodedFrame = decoded;
-        this.consecutiveLosses = 0;
-        this.remoteLateWaits = 0;
-        decodedRealFrame = true;
-      } else if (
-        this.remoteDtxSequence !== null &&
-        sequence >= this.remoteDtxSequence &&
-        this.remoteBuffer.size === 0
-      ) {
-        this.stopRemotePlayout();
-        return;
-      } else {
-        if (this.remoteLateWaits < REMOTE_MISSING_RETRY_LIMIT && this.remoteBuffer.size < this.targetRemoteBufferFrames) {
-          this.remoteLateWaits += 1;
-          this.scheduleRemotePlayout(REMOTE_MISSING_RETRY_MS);
-          return;
-        }
-
-        const alreadyCountedAsLate = this.remoteLateWaits > 0;
-        this.remoteLateWaits = 0;
-        if (!alreadyCountedAsLate) {
-          this.remoteUnderrunsWindow += 1;
-        }
-        this.consecutiveLosses += 1;
-        this.updateRemoteBufferTarget(performance.now(), true);
-        decoded = this.concealRemoteFrame(context.sampleRate);
-      }
-
-      if (this.failed) {
-        return;
-      }
-
-      this.postPlaybackFrame(decoded);
-      this.expectedRemoteSequence = (sequence + 1) >>> 0;
-
-      if (this.consecutiveLosses >= 8 && this.remoteBuffer.size === 0) {
-        this.stopRemotePlayout();
-        return;
-      }
-
-      this.scheduleRemotePlayout(decodedRealFrame ? this.nextRemoteDecodeDelay() : CODEC_FRAME_MS);
+      nextDelayMs = await this.playRemoteTick();
     } catch (error) {
       this.fail(error);
+    } finally {
+      this.remotePlayoutRunning = false;
+      if (!this.failed && nextDelayMs !== null) {
+        this.scheduleRemotePlayout(nextDelayMs);
+      }
     }
+  }
+
+  private async playRemoteTick(): Promise<number | null> {
+    if (this.failed) {
+      return null;
+    }
+
+    if (this.expectedRemoteSequence === null) {
+      return null;
+    }
+
+    const context = await this.ensureContext();
+    if (this.failed) {
+      return null;
+    }
+
+    const sequence = this.expectedRemoteSequence;
+    const buffered = this.remoteBuffer.get(sequence);
+    let decoded: Float32Array;
+    let decodedRealFrame = false;
+
+    if (buffered) {
+      this.remoteBuffer.delete(sequence);
+      decoded = await this.decodeTimed(buffered.payload, context.sampleRate);
+      this.lastDecodedFrame = decoded;
+      this.consecutiveLosses = 0;
+      this.remoteLateWaits = 0;
+      decodedRealFrame = true;
+    } else if (
+      this.remoteDtxSequence !== null &&
+      sequence >= this.remoteDtxSequence &&
+      this.remoteBuffer.size === 0
+    ) {
+      this.stopRemotePlayout();
+      return null;
+    } else {
+      if (this.remoteLateWaits < REMOTE_MISSING_RETRY_LIMIT && this.remoteBuffer.size < this.targetRemoteBufferFrames) {
+        this.remoteLateWaits += 1;
+        return REMOTE_MISSING_RETRY_MS;
+      }
+
+      const alreadyCountedAsLate = this.remoteLateWaits > 0;
+      this.remoteLateWaits = 0;
+      if (!alreadyCountedAsLate) {
+        this.remoteUnderrunsWindow += 1;
+      }
+      this.consecutiveLosses += 1;
+      this.updateRemoteBufferTarget(performance.now(), true);
+      decoded = this.concealRemoteFrame(context.sampleRate);
+    }
+
+    if (this.failed) {
+      return null;
+    }
+
+    this.postPlaybackFrame(decoded);
+    this.expectedRemoteSequence = (sequence + 1) >>> 0;
+
+    if (this.consecutiveLosses >= 8 && this.remoteBuffer.size === 0) {
+      this.stopRemotePlayout();
+      return null;
+    }
+
+    return decodedRealFrame ? this.nextRemoteDecodeDelay() : CODEC_FRAME_MS;
   }
 
   private fail(error: unknown) {
@@ -453,6 +473,7 @@ export class CiaoAudioEngine {
       this.remotePlayoutTimer = undefined;
     }
 
+    this.remotePlayoutRunning = false;
     this.expectedRemoteSequence = null;
     this.remoteDtxSequence = null;
     this.consecutiveLosses = 0;
