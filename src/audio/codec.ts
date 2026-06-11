@@ -1,5 +1,5 @@
 const MODEL_CODEBOOKS = 8;
-const BITS_PER_CODE = 10;
+const BITS_PER_CODE = 11;
 const TOKEN_STEP_SAMPLES = 1_920;
 const TOKEN_STEP_MS = 80;
 const TOKEN_STEPS = 1;

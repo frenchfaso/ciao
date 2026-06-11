@@ -1,6 +1,6 @@
 import { CIAO_ACTIVE_CODEC } from '../audio/codec';
 
-export const CIAO_PROTOCOL = `ciao/${CIAO_ACTIVE_CODEC.id}/v9/s${CIAO_ACTIVE_CODEC.tokenSteps}/cb${CIAO_ACTIVE_CODEC.codebooks}`;
+export const CIAO_PROTOCOL = `ciao/${CIAO_ACTIVE_CODEC.id}/v10/s${CIAO_ACTIVE_CODEC.tokenSteps}/cb${CIAO_ACTIVE_CODEC.codebooks}/b${CIAO_ACTIVE_CODEC.bitsPerCode}`;
 
 const MAGIC = 0x4349414f;
 const VERSION = 1;

@@ -215,7 +215,7 @@ class MimiOnnxStreamingCodec implements CiaoCodec {
     if (
       CIAO_ACTIVE_CODEC.modelCodebooks !== 8 ||
       CIAO_ACTIVE_CODEC.codebooks !== 8 ||
-      CIAO_ACTIVE_CODEC.bitsPerCode !== 10 ||
+      CIAO_ACTIVE_CODEC.bitsPerCode !== 11 ||
       CIAO_ACTIVE_CODEC.inputSamples !== 1_920
     ) {
       throw new Error('Mimi codec config non compatibile');
@@ -274,7 +274,7 @@ export function packCodes(tensor: MimiOrtTensor | undefined) {
   let bitOffset = 0;
   for (let frame = 0; frame < MIMI_TOKEN_STEPS; frame += 1) {
     for (let codebook = 0; codebook < CIAO_ACTIVE_CODEC.codebooks; codebook += 1) {
-      const value = Number(data[layout.index(codebook, frame)]) & 0x3ff;
+      const value = Number(data[layout.index(codebook, frame)]) & 0x7ff;
       writeBits(packet, bitOffset, value, CIAO_ACTIVE_CODEC.bitsPerCode);
       bitOffset += CIAO_ACTIVE_CODEC.bitsPerCode;
     }
